@@ -1,0 +1,232 @@
+---
+title: "Methods_writeup"
+author: "Zach Houghton"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+always_allow_html: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Experiment 1
+
+```{r message = F, echo = F, warning = F}
+library(tidyverse)
+library(kableExtra)
+library(brms)
+library(sjPlot)
+library(flextable)
+library(gt)
+```
+
+```{r echo = F, message = F, warning = F}
+question1_data = read_csv('question1_data.csv')
+
+model_modeling = bf(num_spont_button_press ~ num_modeling_events + (1 + num_modeling_events | household_id), family = negbinomial())
+
+model_modeling = brm(data = question1_data, formula = model_modeling,
+             iter = 10000,
+             cores = 4,
+             chains = 4,
+             thin = 4,
+             warmup = 5000,
+             control = list(max_treedepth = 11,  adapt_delta = 0.99), 
+             init = '0',
+             seed = 45689,
+             #normalize = FALSE,
+             #backend = 'cmdstanr',
+             file = 'model_modeling'
+             #prior = priors
+             )
+```
+
+<!--#See the methods_analyses.rmd file for more information.-->
+
+### Methods
+
+In Experiment 1 we examined the effect of modeling on the number of spontaneous button presses. We used a Bayesian negative binomial model using brms (**CITATION**), implemented in R (**CITATION**). The model equation is given below:
+
+$$
+Dog Presses \sim Modelling Events * Concept + (1 + Modelling Events * Concept | Subject)
+$$
+
+A negative binomial model was used because the outcome variable is count data and the variance is substantially higher than the mean (which is a violation of one of the assumptions of the poisson distribution).
+
+#### Exclusion
+
+We excluded subjects with fewer than 200 recorded presses.
+
+## Results
+
+Our results suggest that there is minimal association between modeling events and button presses. While the results of our regression model are statistically significant ($\beta_{modeling}=0.014$, CI 2.5 = 0.011, CI 97.5 = 0.018), the number is so small that it is rather meaningless. The output of our regression model is included below in table 1:
+
+```{r table1, echo = F}
+
+coef_tbl = as.data.frame(fixef(model_modeling)) %>%
+  mutate_if(is.numeric, round, digits = 2)
+
+#coef_tbl %>% #pdf or html table
+  #kbl() %>%
+  #kable_classic(full_width = F) %>%
+  #footnote(general = 'Table 1: Negative binomial model of dog presses as a function of the number of times the buttons were modeled', general_title = '')
+
+coef_tbl_word = flextable(coef_tbl %>% rownames_to_column('Parameter')) #word table
+
+coef_tbl_word = theme_vanilla(coef_tbl_word)
+coef_tbl_word = add_footer_lines(coef_tbl_word, 'Table 1: Negative binomial model of dog presses as a function of the number of times the buttons were modeled')
+
+coef_tbl_word = bold(coef_tbl_word, i = 1:2)
+coef_tbl_word = vline(coef_tbl_word, j = 1)
+coef_tbl_word = width(coef_tbl_word, width = 1.5)
+coef_tbl_word
+```
+
+Figure \@ref(fig:modeling-plot) demonstrates the relationship (or lack thereof) between number of spontaneous button presses and number of modeling events.
+
+```{r modeling-plot, echo = F, fig.cap = 'Figure 1: Spontaneous button presses by number of modeling events'}
+
+ggplot(question1_data, aes(x = num_modeling_events, y = num_spont_button_press)) + 
+  geom_point(size = 1) +
+  theme_bw() +
+  xlab('Number of Modeling Events') +
+  ylab('Number of Spontaneous Button Presses')
+```
+
+## Experiment 2
+
+```{r echo = F, message = F}
+question2_data = read_csv('question2_data.csv')
+question3_data = read_csv('question3_data.csv')
+#coefs_key_table = read.csv('coefs_key_table.csv', row.names=1)
+
+combo_model2 = brm(combination_freq ~ (1 + combination_id + offset(log(combination_rel_probs)) | subject) + (1 | combination_id),  #1 + combination_id | subject
+             data = question3_data,
+             family = negbinomial(),
+             iter = 8000,
+             cores = 4,
+             chains = 4,
+             warmup = 4000,
+             thin = 4,
+             #backend = 'cmdstanr',
+             control = list(max_treedepth = 12, adapt_delta = 0.99),
+             init = '0',
+             #seed = 1,
+             file = 'combo_model_re'
+             #prior = priors
+             )
+
+```
+
+### Methods
+
+In experiment 2, we examined whether two-button combinations were random or not. That is to say, whether some combinations of buttons are more frequent. Given the size of our dataset, we subsetted the dataset by concept, excluding everything except the 16 concepts that were shared by the most dogs. Note that crucially this subset was not based on how often the dog pressed that concept, but whether the concept was present in the majority of the dogs' soundboards (regardless of whether the dog pressed that concept frequently or not).
+
+In order to avoid conflating non-random combinations of presses with the individual buttons being pressed often, we calculated the relative probability of each individual button being pressed, and for each combination of buttons, we included the product of the relative probability of each button in the combination. An example of this is included below:
+
+```{r echo = F}
+#head(question3_data,10) %>% #table for pdf/html output
+  #kbl() %>% 
+  #kable_classic(full_width = F) %>%
+  #footnote(general = 'Table 2: Example of what our data looked like', general_title = '')
+set.seed = 10
+for_table = slice_sample(question3_data, n = 10) %>%
+  mutate_if(is.numeric, round, digits = 3)
+
+question3_tbl_word = flextable(for_table)
+
+question3_tbl_word = theme_vanilla(question3_tbl_word)
+question3_tbl_word = add_footer_lines(question3_tbl_word, 'Table 2: Example of what our data looked like')
+
+question3_tbl_word = width(question3_tbl_word, width = 1.5)
+question3_tbl_word
+
+```
+
+### Results
+
+Similar to Experiment 1, we then analyzed the data using a Bayesian negative binomial model using brms and implemented in R. Our model equation is listed below (note that we took the log of the relative probabilities for the offset term). We included CombinationID as a random-effect rather than a fixed-effect because it has a large number of levels. Including it as a random-effect rather than a fixed-effect allows for more stable estimates because partial-pooling will pull any estimates for which we don't have strong evidence for towards zero.
+
+$$
+Combination Frequency \sim (1 + Combination ID + offset(rel prob) | Subject + (1|Combination ID)
+$$
+
+A plot of the ten most pressed combinations is included below as well:
+
+```{r combination-plot, echo = F, fig.cap = 'Figure 2: Frequency of combination of presses for 10 most-pressed concepts'}
+
+top_n_rows = 11
+question2_plot = question2_data %>%
+  ungroup() %>%
+  arrange(desc(combination_freq)) %>%
+  slice(1:top_n_rows) 
+
+question2_plot = question2_plot[-8,]
+
+ggplot(question2_plot, aes(x = combination_id, y = combination_freq)) + 
+  geom_point(size = 1) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1))
+```
+
+Our results demonstrate that dogs' presses of combinations of buttons vary depending on the specific combination.
+
+```{r echo = F}
+col_names = c('Estimate', 'Est. Error', 'CI-2.5%', 'CI-97.5%')
+ranefs_table = ranef(combo_model2)
+coef_tbl_combination = as.data.frame(ranefs_table$combination_id) %>%
+  mutate_if(is.numeric, round, digits = 3) 
+
+colnames(coef_tbl_combination) = col_names
+
+table_short = coef_tbl_combination %>%
+  filter((`CI-2.5%` < 0 & `CI-97.5%` < 0) |(`CI-2.5%` > 0 & `CI-97.5%` > 0 ))
+
+table_short = table_short[1:10,]  
+#coef_tbl_combination %>% #table for pdf or html output
+  #kbl() %>%
+  #kable_classic(full_width = F) %>%
+  #footnote(general = 'Table 3: Negative binomial model of dog presses as a function of the number of times the buttons were modeled', general_title = '')
+
+table_ranefs_short = gt(table_short, rownames_to_stub = T) %>%
+  tab_header(title = 'Combination Model Results Short Version') %>%
+  tab_style(locations = cells_column_labels(columns = everything()),
+               cell_text(weight = 'bold')) %>%
+  tab_style(locations = cells_stub(rows = everything()),
+            cell_text(weight = 'bold')) %>%
+  cols_align(align = 'left')
+  
+table_ranefs_short
+
+
+```
+
+The full model results are listed below:
+
+```{r echo = F}
+
+col_names = c('Estimate', 'Est. Error', 'CI-2.5%', 'CI-97.5%')
+ranefs_table = ranef(combo_model2)
+coef_tbl_combination = as.data.frame(ranefs_table$combination_id) %>%
+  mutate_if(is.numeric, round, digits = 3) 
+
+colnames(coef_tbl_combination) = col_names
+
+#coef_tbl_combination %>% #table for pdf or html output
+  #kbl() %>%
+  #kable_classic(full_width = F) %>%
+  #footnote(general = 'Table 3: Negative binomial model of dog presses as a function of the number of times the buttons were modeled', general_title = '')
+
+table_ranefs = gt(coef_tbl_combination, rownames_to_stub = T) %>%
+  tab_header(title = 'Combination Model Results') %>%
+  tab_style(locations = cells_column_labels(columns = everything()),
+               cell_text(weight = 'bold')) %>%
+  tab_style(locations = cells_stub(rows = everything()),
+            cell_text(weight = 'bold')) %>%
+  cols_align(align = 'left')
+  
+table_ranefs
+```
