@@ -1,0 +1,497 @@
+---
+title: 'Network Analysis on 08/23 export '
+output:
+  pdf_document: default
+  html_document: default
+date: "2022-08-25"
+---
+
+
+
+```{r setup, include=FALSE}
+library(plyr)
+library(tidyverse)
+library(viridis)
+library(igraph)
+library(BayesFactor)
+library(forcats)
+```
+# Table of Contents
+
+1. [Extracting 2 button combinations]
+2. [Visualizing graphs]
+3. [Analysing graphs]
+
+First we load the data.
+
+```{r}
+presses=read_csv("data/export_08_23_2022.csv") %>%
+  mutate(text=tolower(text))%>% 
+  mutate(text=iconv(text, "latin1", "ASCII", sub="")) %>% 
+  mutate(text=trimws(text, which=c("both")))
+buttons=read.csv("data/buttonsupdated.csv")
+buttonannotator_anon=read.csv("data/buttonannotator.csv") %>%
+  mutate(text=tolower(sound)) %>% 
+  mutate(text=iconv(text, "latin1", "ASCII", sub="")) %>%
+  mutate(text=trimws(text, which=c("both")))%>%
+  dplyr::rename(unique_id=participant_id)  %>% 
+  left_join (unique(presses %>% select(unique_id,pusher_id,household_id)), by="unique_id")%>% 
+  select(pusher_id, household_id, text, x, y) 
+
+
+buttonannotator_anon2 <- read.csv("data/buttonsupdated.csv") %>% 
+  filter(email== 'lucas@getcleverpet.com'|email == 'lucas@getclever.pet')%>%
+  mutate (text=tolower(enc2utf8(as.character(sound)))) %>% 
+  mutate(text=iconv(text, "latin1", "ASCII", sub="")) %>%
+  mutate(text=trimws(text, which = c("both")))%>%
+  mutate(text= replace(text, text == 'denna',  'donna')) %>% 
+  dplyr::rename("unique_id"="participant_id")  %>% 
+  left_join (unique(presses %>% select(unique_id,pusher_id,household_id)), by="unique_id")%>% 
+  select(pusher_id, household_id, text, x, y) 
+
+
+                  
+```
+
+# Extracting 2 button combinations
+
+A data frame is created including all 2 consecutive button presses.
+We include only interactions with more than 1 different button.
+```{r}
+
+multi_button_interactions=presses %>%
+  filter((learner_type=="Dog"|learner_type=="dog")&interactions_count>=200 & unique_buttons_per_interaction>=2)
+#it deletes spams (pressing same button in interactions) by keeping only unique buttons per interaction:
+without_spamming=multi_button_interactions %>%
+  select(-c(is_human,is_human,contexts, sound)) %>%
+  group_by(interaction_id) %>%
+  distinct(text, .keep_all=TRUE) 
+```
+
+Because button presses from the same interaction are ordered, we replicate the 
+data set twice. 
+On the first replica, the last button of each interaction is erased.
+On the second replica the first button of each interaction is erased.
+
+```{r}
+first_button=without_spamming %>%
+  group_by(interaction_id) %>%
+  arrange(interaction_id,press_order) %>%
+  slice(-n())
+second_button=without_spamming %>%
+  group_by(interaction_id) %>%
+  arrange(interaction_id,press_order) %>%
+  slice(-1)
+```
+
+Each row is the combination of two buttons, text and concept of both buttons are 
+specified:
+
+```{r}
+combinations=first_button %>%
+  ungroup() %>%
+  dplyr::rename("concept_1"="concept","text_1"="text")
+combinations$concept_2 = second_button$concept
+combinations$text_2 = second_button$text
+combinations$textA = apply((combinations %>%
+                                 select(text_1, text_2)), 1, min)
+combinations$textB = apply((combinations %>%
+                                 select(text_1, text_2)), 1, max)
+
+combinations$conceptA = apply((combinations %>%
+                                 select(concept_1, concept_2)), 1, min)
+combinations$conceptB = apply((combinations %>%
+                                 select(concept_1, concept_2)), 1, max)
+combinations = combinations %>%
+  relocate(pusher_id, interaction_id, conceptA, conceptB, textA,textB)
+```
+
+
+Then 3 edge dataframes are created.:
+
+-`concepts_matrix` using concepts
+
+-`text_occurrences`using buttons labels and number of occurrences (that will be used as edge weights)
+
+-`text_timestamps` using button labels and timestamps 
+
+
+```{r}
+#with concepts
+concepts_matrix=combinations%>%
+  select(conceptA,conceptB) %>%
+  ddply(.(conceptA,conceptB),nrow) %>% 
+  filter((conceptA !="OTHER" & conceptB !="OTHER")&(conceptA !=conceptB))
+
+
+#with number of occurrences
+text_occurrences = combinations %>%
+  select(textA,textB,pusher_id) %>%
+  arrange(pusher_id) %>%
+  ddply(.(pusher_id,textA,textB),nrow)%>% 
+  group_by(pusher_id) %>% 
+  dplyr::rename(weight=V1) %>% 
+  relocate(textA,textB)
+
+#with timestamps
+text_timestamps=combinations %>%
+  select(textA,textB,occurred_at,pusher_id) %>%
+  arrange(pusher_id,occurred_at) %>% 
+  left_join(text_occurrences,by=c("pusher_id", "textA","textB"))
+```
+
+We now create lists of igraph objects, where each list element corresponds to a subject.
+We use dplyr::group_map() to apply the
+`grapher()` function to each subject, identified by `pusher_id`.
+
+```{r}
+grapher=function(x){graph_from_data_frame(x, directed=F)}
+graphs_w_occurrences=text_occurrences %>%
+  group_map(~grapher(.x)) 
+graph_names=unique(text_occurrences$pusher_id)
+names(graphs_w_occurrences)=graph_names
+
+#alternative version to filter combinations with a minimum of occurrences
+min_ocurrences=1
+graphs_w_min_occurrences=text_occurrences %>%
+  filter(weight>min_ocurrences) %>%
+  group_map(~grapher(.x))
+
+graph_min_names=unique((text_occurrences %>% filter(weight>min_ocurrences))$pusher_id)
+names(graphs_w_min_occurrences)=graph_min_names
+
+graphs_w_occurrences=graphs_w_min_occurrences
+```
+
+# Visualizing graphs
+
+## Most common combinations
+
+Below is a visualization of most common concept combinations across all dogs.
+The width of the edge is proportional to the frequency of a combination.
+
+```{r}
+min_ocurrences = 150
+top_concepts_matrix = concepts_matrix%>% 
+  filter(V1>min_ocurrences) %>%
+  dplyr::rename(weight=V1)
+#concepts graphs accross dogs
+
+concept_count = presses %>%
+  filter(learner_type_id == 1 & interactions_count>=200 & unique_buttons_per_interaction==1) %>%
+  select(concept) %>%
+  dplyr::count(concept) %>%
+  filter(concept %in% top_concepts_matrix$conceptA | concept %in% top_concepts_matrix$conceptB) %>% 
+  dplyr::rename(strength=n)
+
+
+
+graph_concepts = graph_from_data_frame((na.omit(top_concepts_matrix)),vertices=concept_count,directed=F)
+
+
+maxColorValue=max(concept_count$strength)+1500
+palette=colorRampPalette(c("navyblue","aquamarine1","yellow"),bias=2)(maxColorValue)
+
+par(bg="white")
+plot(graph_concepts,
+     layout=layout_with_kk,
+     vertex.color=palette[cut(V(graph_concepts)$strength, maxColorValue)],
+     vertex.frame.color="black",
+     vertex.label.color="black",
+     vertex.label.font=2,
+     vertex.label.family="Helvetica", 
+     vertex.label.dist=-1.2,
+     edge.color=palette[cut(E(graph_concepts)$weight, maxColorValue)],
+     edge.width=(E(graph_concepts)$weight)/90,
+     vertex.size=9,
+     vertex.label.cex=(2.2),
+     edge.curved=0.3
+     )
+
+```
+
+
+Let's look at the list of most frequent combinations:
+
+```{r}
+sorted_combinations=combinations
+sorted_combinations[which(sorted_combinations$conceptA > sorted_combinations$conceptB), c("conceptA", "conceptB")]=rev(sorted_combinations[which(sorted_combinations$conceptA > sorted_combinations$conceptB), c("conceptA", "conceptB")])
+
+top_combinations_withindogs=sorted_combinations %>%
+  select(pusher_id, conceptA,conceptB) %>%
+  distinct() %>%
+  select(- pusher_id) %>% 
+  ddply(.(conceptA,conceptB),nrow) %>% 
+  filter((conceptA !="OTHER" & conceptB !="OTHER")&(conceptA !=conceptB)) %>% 
+  arrange(-V1) %>% 
+  dplyr::rename("occurrences"="V1") %>% mutate(type="dogs") %>% mutate(combination=rownames(.))
+
+top_combinations_accrossdogs=sorted_combinations %>%
+  select(conceptA,conceptB) %>% 
+  ddply(.(conceptA,conceptB),nrow) %>% 
+  filter((conceptA !="OTHER" & conceptB !="OTHER")&(conceptA !=conceptB)) %>% 
+  arrange(-V1) %>%
+  dplyr::rename("occurrences"="V1")%>% mutate(type="interactions") %>%mutate(combination=rownames(.))
+
+wide_data=rbind(top_combinations_withindogs[1:10,],top_combinations_accrossdogs[1:10,]) 
+long_data=pivot_longer(wide_data,cols=starts_with("concept"),names_to="order",values_to="concept") 
+
+ggplot(wide_data %>% filter(type=="dogs"), aes(x=conceptA, y=conceptB, color=occurrences)) + geom_point(pch=15, size=20) + scale_color_viridis()
+
+```
+
+
+
+##  Graphs with spatial information
+
+
+```{r}
+concept_availability_days<- presses %>%
+    filter(learner_type_id==1& interactions_count>=200) %>% 
+    dplyr::select (pusher_id,text, day) %>% 
+    group_by(pusher_id,text) %>%
+    summarize(n_distinct(day))
+```
+
+
+```{r}
+
+#text_count=presses %>%
+ # filter(learner_type_id==1& interactions_count>=200 & unique_buttons_per_interaction==1) %>%
+#  select(text,pusher_id) %>%
+#  group_by(pusher_id) %>% 
+#  dplyr::count(text) %>% 
+#  dplyr::rename(strength=n)
+
+text_count=presses %>%
+  select(text,pusher_id) %>%
+  group_by(pusher_id) %>% 
+  dplyr::count(text) %>% 
+  dplyr::rename(strength=n)
+
+vertex_coordinates=buttonannotator_anon2 %>%
+  select(text,x,y,pusher_id) %>% 
+  left_join(text_count,by=c("pusher_id", "text")) %>% 
+  mutate(y=y)
+  
+vertex_coordinates=vertex_coordinates[!duplicated(vertex_coordinates[ , c("pusher_id","text")]),]
+
+
+
+spatial_network=function(id,size=4){
+vertices_df=vertex_coordinates %>% filter(pusher_id==id)
+edge_df=text_occurrences %>%
+  filter(pusher_id==id & (textA %in% vertices_df$text & textB %in% vertices_df$text))
+
+
+maxColorValue=max((text_count %>% filter(pusher_id==id))$strength)
+palette=colorRampPalette(c("navyblue","aquamarine1","yellow"),bias=2)(maxColorValue+2000)
+palette=viridis(n=500)
+
+
+graph_spatial=graph_from_data_frame(edge_df,
+                      vertices=vertices_df,directed=F)
+par(bg='white')
+plot(graph_spatial, layout=layout_nicely,
+     rescale=FALSE,
+     edge.width=0*(E(graph_spatial)$weight)/(1.5*mean(E(graph_spatial)$weight))
+     ,
+     vertex.color=palette[cut(V(graph_spatial)$strength, maxColorValue+10)],
+     vertex.size=size*diff(range(V(graph_spatial)$x)),
+     vertex.frame.color="white",
+     vertex.label=NA,
+     vertex.label.color="beige",
+     vertex.label.family="Helvetica", 
+     vertex.label.dist=-300,
+     xlim=range( V(graph_spatial)$x),
+     ylim=range( V(graph_spatial)$y),
+     edge.curved=0.3)
+
+title(paste("User",id,"'s network"),cex.main=2,col.main="beige")
+
+
+}
+
+spatial_network(6325)
+spatial_network(11641)
+spatial_network(4695)
+
+
+
+
+
+#spatial_network_LEGEND=function(id){
+#maxColorValue=max((text_count %>% filter(pusher_id==id))$strength)
+#palette=colorRampPalette(c("navyblue","aquamarine1","yellow"),bias=2)(maxColorValue)
+#ggplot(text_count %>% filter(pusher_id==id))
+```
+
+```{r}
+spatial_network(6325)
+spatial_network(11641)
+spatial_network(4695)
+
+#spatials=subset(text_count, text_count$pusher_id %in% (vertex_coordinates %>% count(pusher_id) %>% filter(n>3))$pusher_id)
+#lapply(unique(spatials$pusher_id) ,spatial_network)
+```
+
+
+
+
+# Analysing graphs
+
+In this section we implement:
+
+-a function to measure the Randomness index of an unweighted, 
+undirected graph
+
+-a function to measure the mean randomness index of 1000 graphs generated by the 
+Erdos-Renyi (GnP model)
+
+
+
+## Randomness index
+
+The Randomness Index (Nastarajan 2017) is a metric for undirected, unweighted networks.
+It derives from the empirical observation that "real world networks" show, on average, 
+negative correlation between the degree of their nodes and their averaged 
+Local Clustering Coefficient.
+
+The function then extracts the degrees and LCC's of every node in the graph.
+It groups the LCC by degrees then averages them. We have now the 2 data points 
+that we need: degree and mean LCC (degree).
+The Pearson's correlation test is performed and the output is the randomness Index.
+
+```{r}
+randomness_index=function(x){
+  #We measure the degree of each node.
+  degree_graph=degree(x)
+  #We measure the LCC (or transitivity) of each node:
+  lcc_graph=transitivity(x, type="local", isolates=("NaN"))
+  #it creates a 2 column data frame with mean LCC by degree
+  mean_lcc_vs_degree=data.frame(deg=(degree_graph),lcc_graph)%>% 
+    group_by(deg)%>%
+    summarise_at(vars(lcc_graph), list(mean_lcc=mean))
+  # pearson correlation between mean LCC by degree
+  cor(mean_lcc_vs_degree$deg, mean_lcc_vs_degree$mean_lcc, method='pearson',use="pairwise.complete.obs") }
+```
+
+The input should be an igraph object.
+The value is the Randomness Index, a correlation value between -1 and 1.
+
+## Generated random graphs
+
+The following function is complementary to the one above.
+It's input should be an `igraph`
+ object, of which it takes only 3 measures:
+
+- the number of nodes of the graph (n) 
+
+- the mean degree of a node
+
+- the number of edges of the graph
+
+Then using `igraph::sample_gnp()`, it creates a random graph with the same 
+number of nodes as the input graph, and the following method to draw edges: 
+For each pair of nodes a random number between 0 and 1 is generated, if the number 
+is below p, an edge is drawn between the nodes. (Erdos-Renyi 1959)
+
+The function replicates this process creating 1000 pseudo-random graphs.
+Then, using the `randomness_index` function, we measure the RI of the generated 
+graphs then we compute the mean.
+
+```{r}
+erdos_renyi_index=function(x){
+  #number of nodes of input graph
+  n=gorder(x)
+  #probability of an edge between 2 nodes
+  p=(mean(degree(x)))/(n-1)
+  #number of edges of input graph
+  m=gsize(x)
+  #if the graph has 3 edges or less, the randomness index cannot be computed
+  if (p<=0 | p>1 | m<4 ) {NA}
+  else{
+  mean(replicate(1000, randomness_index(sample_gnp(n, p))),na.rm=T)
+  }
+}
+```
+
+## Results 
+
+We apply the `randomness_index()`and `erdos_renyi_index()` functions over all 
+graphs.
+Then we create the `results`df that has one graph per row, with variables:
+
+-real_RI
+
+-erdos_renyi_RI
+
+-number_of_nodes
+
+-number_of_edges
+
+-number_of_occurrences
+
+```{r, warning=FALSE}
+r_i=sapply(graphs_w_occurrences, randomness_index)
+
+erdos_renyi_r_i=sapply(graphs_w_occurrences, erdos_renyi_index)
+
+number_of_nodes=sapply(graphs_w_occurrences, gorder)
+
+number_of_edges=sapply(graphs_w_occurrences, gsize)
+
+number_of_occurrences=text_occurrences %>% summarise(Ocurrences=sum(weight))
+
+results=data.frame(real_RI=r_i,erdos_renyi_RI=erdos_renyi_r_i,number_of_nodes,number_of_edges,number_of_occurrences)
+```
+
+We transform the results dataframe in "tidy" format (one observation per row).
+We plot the density of both the real Randomness Indices and the 
+averaged RI's from randomized graphs.
+
+```{r}
+results$pusher_id = rownames(results)
+tidy_results = results %>%
+  filter(!is.na(r_i)& !is.na(erdos_renyi_r_i)) %>%
+  select(pusher_id,real_RI,erdos_renyi_RI ) %>% 
+  gather(type,RI, -pusher_id)
+mu=ddply(tidy_results, "type", summarise, grp.median=median(RI, na.rm=T))
+mu$mode= c(-0.07856112,-0.8749992)
+
+
+ggplot(tidy_results, aes(x=RI, fill=type))+
+  geom_density(alpha=0.5)+labs(title="Distribution of Randomness Indexes")+
+  geom_vline(data=mu, aes(xintercept=mode),
+             linetype="dashed",show.legend=F)+
+  annotate("text",mu$mode+0.22, y=3.4, label=paste("mode:",round(mu$mode,2)),cex=4.5)+
+  theme_classic()+
+  scale_fill_viridis(discrete = T, option="E", labels=c('Randomised Networks', 'Real Networks'))+
+  scale_color_viridis(discrete = T, option="E")+
+  ylab("")+
+  theme(legend.position="bottom")
+
+
+# install.packages("modest")
+#library(modeest)
+
+# Moda
+mlv(r_i, method = "meanshift", na.rm = T) # 
+mlv(erdos_renyi_r_i, method = "meanshift", na.rm = T) # 
+
+```
+
+
+```{r}
+
+ggplot(tidy_results, aes(x=(fct_reorder(factor(pusher_id), RI)),y=RI, color=type))+ geom_point()
+
+ggplot(results, aes(x=erdos_renyi_RI, y=real_RI, col=number_of_edges )) + geom_point()+geom_abline()+scale_color_viridis(trans="log")
+```
+We now do a bayesian paired t test analysis:
+```{r}
+library(BayesFactor)
+results$difference=results$erdos_renyi_RI - results$real_RI
+
+ttestBF(results$difference[ !is.na(results$difference) ], nullInterval=c(0, 2))
+```
